@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.19;
 
-import {EVM2EVMOnRamp} from "../../onRamp/EVM2EVMOnRamp.sol";
+import {EVM2EVMMultiOnRamp} from "../../onRamp/EVM2EVMMultiOnRamp.sol";
 import {Router} from "../../Router.sol";
 import {PriceRegistry} from "../../PriceRegistry.sol";
 import {PriceRegistrySetup} from "../priceRegistry/PriceRegistry.t.sol";
 import {Internal} from "../../libraries/Internal.sol";
 import {Client} from "../../libraries/Client.sol";
-import {EVM2EVMOnRampHelper} from "../helpers/EVM2EVMOnRampHelper.sol";
+import {EVM2EVMMultiOnRampHelper} from "../helpers/EVM2EVMMultiOnRampHelper.sol";
 import "../TokenSetup.t.sol";
+import "../../onRamp/EVM2EVMMultiOnRamp.sol";
 
-contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
+contract EVM2EVMMultiOnRampSetup is TokenSetup, PriceRegistrySetup {
   // Duplicate event of the CCIPSendRequested in the IOnRamp
   event CCIPSendRequested(Internal.EVM2EVMMessage message);
 
@@ -22,11 +23,11 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
 
   bytes32 internal s_metadataHash;
 
-  EVM2EVMOnRampHelper internal s_onRamp;
+  EVM2EVMMultiOnRampHelper internal s_onRamp;
   address[] internal s_offRamps;
 
-  EVM2EVMOnRamp.FeeTokenConfigArgs[] internal s_feeTokenConfigArgs;
-  EVM2EVMOnRamp.TokenTransferFeeConfigArgs[] internal s_tokenTransferFeeConfigArgs;
+  EVM2EVMMultiOnRamp.FeeTokenConfigArgs[] internal s_feeTokenConfigArgs;
+  EVM2EVMMultiOnRamp.TokenTransferFeeConfigArgs[] internal s_tokenTransferFeeConfigArgs;
 
   function setUp() public virtual override(TokenSetup, PriceRegistrySetup) {
     TokenSetup.setUp();
@@ -37,7 +38,7 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
     address WETH = s_sourceRouter.getWrappedNative();
 
     s_feeTokenConfigArgs.push(
-      EVM2EVMOnRamp.FeeTokenConfigArgs({
+      EVM2EVMMultiOnRamp.FeeTokenConfigArgs({
         token: s_sourceFeeToken,
         networkFeeUSDCents: 1_00, // 1 USD
         gasMultiplierWeiPerEth: 1e18, // 1x
@@ -46,7 +47,7 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
       })
     );
     s_feeTokenConfigArgs.push(
-      EVM2EVMOnRamp.FeeTokenConfigArgs({
+      EVM2EVMMultiOnRamp.FeeTokenConfigArgs({
         token: WETH,
         networkFeeUSDCents: 5_00, // 5 USD
         gasMultiplierWeiPerEth: 2e18, // 2x
@@ -56,7 +57,7 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
     );
 
     s_tokenTransferFeeConfigArgs.push(
-      EVM2EVMOnRamp.TokenTransferFeeConfigArgs({
+      EVM2EVMMultiOnRamp.TokenTransferFeeConfigArgs({
         token: s_sourceFeeToken,
         minFeeUSDCents: 1_00, // 1 USD
         maxFeeUSDCents: 1000_00, // 1,000 USD
@@ -66,7 +67,7 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
       })
     );
     s_tokenTransferFeeConfigArgs.push(
-      EVM2EVMOnRamp.TokenTransferFeeConfigArgs({
+      EVM2EVMMultiOnRamp.TokenTransferFeeConfigArgs({
         token: s_sourceRouter.getWrappedNative(),
         minFeeUSDCents: 50, // 0.5 USD
         maxFeeUSDCents: 500_00, // 500 USD
@@ -76,7 +77,7 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
       })
     );
     s_tokenTransferFeeConfigArgs.push(
-      EVM2EVMOnRamp.TokenTransferFeeConfigArgs({
+      EVM2EVMMultiOnRamp.TokenTransferFeeConfigArgs({
         token: CUSTOM_TOKEN,
         minFeeUSDCents: 2_00, // 1 USD
         maxFeeUSDCents: 2000_00, // 1,000 USD
@@ -86,11 +87,10 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
       })
     );
 
-    s_onRamp = new EVM2EVMOnRampHelper(
-      EVM2EVMOnRamp.StaticConfig({
+    s_onRamp = new EVM2EVMMultiOnRampHelper(
+      EVM2EVMMultiOnRamp.StaticConfig({
         linkToken: s_sourceTokens[0],
         chainSelector: SOURCE_CHAIN_ID,
-        destChainSelector: DEST_CHAIN_ID,
         defaultTxGasLimit: GAS_LIMIT,
         maxNopFeesJuels: MAX_NOP_FEES_JUELS,
         prevOnRamp: address(0),
@@ -104,10 +104,7 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
       getNopsAndWeights()
     );
     s_onRamp.setAdmin(ADMIN);
-
-    s_metadataHash = keccak256(
-      abi.encode(Internal.EVM_2_EVM_MESSAGE_HASH, SOURCE_CHAIN_ID, DEST_CHAIN_ID, address(s_onRamp))
-    );
+    s_onRamp.addDestChain(DEST_CHAIN_ID);
 
     TokenPool.RampUpdate[] memory onRamps = new TokenPool.RampUpdate[](1);
     onRamps[0] = TokenPool.RampUpdate({ramp: address(s_onRamp), allowed: true, rateLimiterConfig: rateLimiterConfig()});
@@ -129,6 +126,10 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
     // only cover actual gas usage from the ramps
     IERC20(s_sourceTokens[0]).approve(address(s_sourceRouter), 2 ** 128);
     IERC20(s_sourceTokens[1]).approve(address(s_sourceRouter), 2 ** 128);
+  }
+
+  function _calculateMetadataHash(uint64 destChainId) internal view returns (bytes32) {
+    return keccak256(abi.encode(Internal.EVM_2_EVM_MESSAGE_HASH, SOURCE_CHAIN_ID, destChainId, address(s_onRamp)));
   }
 
   function _generateTokenMessage() public view returns (Client.EVM2AnyMessage memory) {
@@ -174,6 +175,7 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
   }
 
   function _messageToEvent(
+    uint64 destChainSelector,
     Client.EVM2AnyMessage memory message,
     uint64 seqNum,
     uint64 nonce,
@@ -202,16 +204,18 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
       messageId: ""
     });
 
-    messageEvent.messageId = Internal._hash(messageEvent, s_metadataHash);
+    bytes32 metadataHash = _calculateMetadataHash(destChainSelector);
+
+    messageEvent.messageId = Internal._hash(messageEvent, metadataHash);
     return messageEvent;
   }
 
   function generateDynamicOnRampConfig(
     address router,
     address priceRegistry
-  ) internal pure returns (EVM2EVMOnRamp.DynamicConfig memory) {
+  ) internal pure returns (EVM2EVMMultiOnRamp.DynamicConfig memory) {
     return
-      EVM2EVMOnRamp.DynamicConfig({
+      EVM2EVMMultiOnRamp.DynamicConfig({
         router: router,
         maxNumberOfTokensPerMsg: MAX_TOKENS_LENGTH,
         destGasOverhead: DEST_GAS_OVERHEAD,
@@ -225,11 +229,11 @@ contract EVM2EVMOnRampSetup is TokenSetup, PriceRegistrySetup {
       });
   }
 
-  function getNopsAndWeights() internal pure returns (EVM2EVMOnRamp.NopAndWeight[] memory) {
-    EVM2EVMOnRamp.NopAndWeight[] memory nopsAndWeights = new EVM2EVMOnRamp.NopAndWeight[](3);
-    nopsAndWeights[0] = EVM2EVMOnRamp.NopAndWeight({nop: USER_1, weight: 19284});
-    nopsAndWeights[1] = EVM2EVMOnRamp.NopAndWeight({nop: USER_2, weight: 52935});
-    nopsAndWeights[2] = EVM2EVMOnRamp.NopAndWeight({nop: USER_3, weight: 8});
+  function getNopsAndWeights() internal pure returns (EVM2EVMMultiOnRamp.NopAndWeight[] memory) {
+    EVM2EVMMultiOnRamp.NopAndWeight[] memory nopsAndWeights = new EVM2EVMMultiOnRamp.NopAndWeight[](3);
+    nopsAndWeights[0] = EVM2EVMMultiOnRamp.NopAndWeight({nop: USER_1, weight: 19284});
+    nopsAndWeights[1] = EVM2EVMMultiOnRamp.NopAndWeight({nop: USER_2, weight: 52935});
+    nopsAndWeights[2] = EVM2EVMMultiOnRamp.NopAndWeight({nop: USER_3, weight: 8});
     return nopsAndWeights;
   }
 }

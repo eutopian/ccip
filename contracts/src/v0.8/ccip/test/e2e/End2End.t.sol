@@ -3,14 +3,14 @@ pragma solidity 0.8.19;
 
 import "../helpers/MerkleHelper.sol";
 import "../commitStore/CommitStore.t.sol";
-import "../onRamp/EVM2EVMOnRampSetup.t.sol";
 import "../offRamp/EVM2EVMOffRampSetup.t.sol";
+import "../onRamp/EVM2EVMMultiOnRampSetup.t.sol";
 
-contract E2E is EVM2EVMOnRampSetup, CommitStoreSetup, EVM2EVMOffRampSetup {
+contract E2E is EVM2EVMMultiOnRampSetup, CommitStoreSetup, EVM2EVMOffRampSetup {
   using Internal for Internal.EVM2EVMMessage;
 
-  function setUp() public virtual override(EVM2EVMOnRampSetup, CommitStoreSetup, EVM2EVMOffRampSetup) {
-    EVM2EVMOnRampSetup.setUp();
+  function setUp() public virtual override(EVM2EVMMultiOnRampSetup, CommitStoreSetup, EVM2EVMOffRampSetup) {
+    EVM2EVMMultiOnRampSetup.setUp();
     CommitStoreSetup.setUp();
     EVM2EVMOffRampSetup.setUp();
 
@@ -109,6 +109,7 @@ contract E2E is EVM2EVMOnRampSetup, CommitStoreSetup, EVM2EVMOffRampSetup {
 
     message.receiver = abi.encode(address(s_receiver));
     Internal.EVM2EVMMessage memory geEvent = _messageToEvent(
+      DEST_CHAIN_ID,
       message,
       expectedSeqNum,
       expectedSeqNum,
