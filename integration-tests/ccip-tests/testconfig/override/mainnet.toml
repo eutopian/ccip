@@ -30,7 +30,7 @@ Data = """
           },
           "Ethereum Mainnet": {
             "off_ramp": "0x542ba1902044069330e8c5b36A84EC503863722f",
-            "commit_store": "0x060331fEdA35691e54876D957B4F9e3b8Cb47d20",
+            "commit_store": "0x060331feda35691e54876d957b4f9e3b8cb47d20",
             "receiver_dapp": "0xAFa2c441a83bBCEDc2E8c5c6f66248aFD8b9af3d"
           }
         }
@@ -143,6 +143,10 @@ Data = """
           "WeMix Mainnet": {
             "on_ramp": "0xCbE7e5DA76dC99Ac317adF6d99137005FDA4E2C4",
             "deployed_at": 11111111
+          },
+          "Polygon Mainnet": {
+            "on_ramp": "0x35F0ca9Be776E4B38659944c257bDd0ba75F1B8B",
+            "deployed_at": 11111111
           }
         },
         "dest_contracts": {
@@ -159,6 +163,11 @@ Data = """
           "WeMix Mainnet": {
             "off_ramp": "0x3a129e6C18b23d18BA9E6Aa14Dc2e79d1f91c6c5",
             "commit_store": "0x31f6ab382DDeb9A316Ab61C3945a5292a50a89AB",
+            "receiver_dapp": "0xAFa2c441a83bBCEDc2E8c5c6f66248aFD8b9af3d"
+          },
+          "Polygon Mainnet": {
+            "off_ramp": "0x0af338F0E314c7551bcE0EF516d46d855b0Ee395",
+            "commit_store": "0xD37a60E8C36E802D2E1a6321832Ee85556Beeb76",
             "receiver_dapp": "0xAFa2c441a83bBCEDc2E8c5c6f66248aFD8b9af3d"
           }
         }
@@ -210,8 +219,7 @@ Data = """
         }
       },
       "Polygon Mainnet": {
-        "is_native_fee_token": true,
-        "fee_token": "",
+        "fee_token": "0xb0897686c545045aFc77CF20eC7A532E3120E0F1",
         "bridge_tokens": [],
         "bridge_tokens_pools": [],
         "arm": "0xD7AcF65dA1E1f34b663aB199a474F209bF2b0523",
@@ -222,12 +230,21 @@ Data = """
           "Avalanche Mainnet": {
             "on_ramp": "0x5FA30697e90eB30954895c45b028F7C0dDD39b12",
             "deployed_at": 11111111
+          },
+          "Ethereum Mainnet": {
+            "on_ramp": "0xFd77c53AA4eF0E3C01f5Ac012BF7Cc7A3ECf5168",
+            "deployed_at": 11111111
           }
         },
         "dest_contracts": {
           "Avalanche Mainnet": {
             "off_ramp": "0xB9e3680639c9F0C4e0b02FD81C445094426244Ae",
             "commit_store": "0x8c63d4e67f7c4af6FEd2f56A34fB4e01CB807CFF",
+            "receiver_dapp": "0xAFa2c441a83bBCEDc2E8c5c6f66248aFD8b9af3d"
+          },
+          "Ethereum Mainnet": {
+            "off_ramp": "0x45320085fF051361D301eC1044318213A5387A15",
+            "commit_store": "0x4Dc771B5ef21ef60c33e2987E092345f2b63aE08",
             "receiver_dapp": "0xAFa2c441a83bBCEDc2E8c5c6f66248aFD8b9af3d"
           }
         }
@@ -283,8 +300,8 @@ ExistingEnv = 'mainnet-2.7-ccip1.2'
 
 [CCIP.Groups.smoke]
 MsgType = 'WithoutToken'
-NetworkPairs = ['AVALANCHE_MAINNET,POLYGON_MAINNET']
-BiDirectionalLane = true
+NetworkPairs = ['POLYGON_MAINNET,ETHEREUM_MAINNET']
+BiDirectionalLane = false
 PhaseTimeout = '50m'
 LocalCluster = false
 ExistingDeployment = true
