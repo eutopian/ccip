@@ -144,6 +144,10 @@
           "Polygon Mainnet": {
             "on_ramp": "0x35F0ca9Be776E4B38659944c257bDd0ba75F1B8B",
             "deployed_at": 11111111
+          },
+          "Optimism Mainnet": {
+            "on_ramp": "0x86B47d8411006874eEf8E4584BdFD7be8e5549d1",
+            "deployed_at": 11111111
           }
         },
         "dest_contracts": {
@@ -165,6 +169,11 @@
           "Polygon Mainnet": {
             "off_ramp": "0x0af338F0E314c7551bcE0EF516d46d855b0Ee395",
             "commit_store": "0xD37a60E8C36E802D2E1a6321832Ee85556Beeb76",
+            "receiver_dapp": "0xAFa2c441a83bBCEDc2E8c5c6f66248aFD8b9af3d"
+          },
+          "Optimism Mainnet": {
+            "off_ramp": "0xB095900fB91db00E6abD247A5A5AD1cee3F20BF7",
+            "commit_store": "0x4af4B497c998007eF83ad130318eB2b925a79dc8",
             "receiver_dapp": "0xAFa2c441a83bBCEDc2E8c5c6f66248aFD8b9af3d"
           }
         }
@@ -202,15 +211,15 @@
         "price_registry": "0xb52545aECE8C73A97E52a146757EC15b90Ed8488",
         "wrapped_native": "0x4200000000000000000000000000000000000006",
         "src_contracts": {
-          "": {
-            "on_ramp": "0x0",
+          "Ethereum Mainnet": {
+            "on_ramp": "0x55183Db1d2aE0b63e4c92A64bEF2CBfc2032B127",
             "deployed_at": 11111111
           }
         },
         "dest_contracts": {
-          "": {
-            "off_ramp": "0x0",
-            "commit_store": "0x0",
+          "Ethereum Mainnet": {
+            "off_ramp": "0xd2D98Be6a1C241e86C807e51cED6ABb51d044203",
+            "commit_store": "0x4d75A5cE454b264b187BeE9e189aF1564a68408D",
             "receiver_dapp": "0xAFa2c441a83bBCEDc2E8c5c6f66248aFD8b9af3d"
           }
         }
