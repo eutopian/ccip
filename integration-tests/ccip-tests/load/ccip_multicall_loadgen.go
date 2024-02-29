@@ -155,74 +155,91 @@ func (m *CCIPMultiCallLoadGenerator) Call(_ *wasp.Generator) *wasp.Response {
 	}()
 	m.logger.Info().Interface("msgs", msgs).Msgf("Sending %d ccip-send calls", len(msgs))
 	startTime := time.Now().UTC()
+	// if msgs contain more than 10 break it down to diff batches of 10 each
+	batches := make(map[int][]contracts.CCIPMsgData)
+	if len(msgs) > 10 {
+		chunkSize := 10
+		counter := 1
+		for i := 0; i < len(msgs); i += chunkSize {
+			end := i + chunkSize
+			if end > len(msgs) {
+				end = len(msgs)
+			}
+			batches[counter] = msgs[i:end]
+			counter++
+		}
+	} else {
+		batches[1] = msgs[:]
+	}
 	// for now we are using all ccip-sends with native
-	sendTx, err := contracts.MultiCallCCIP(m.client, m.MultiCall, msgs, true)
-	if err != nil {
-		res.Error = err.Error()
-		res.Failed = true
-		return res
-	}
+	for _, msgs := range batches {
+		sendTx, err := contracts.MultiCallCCIP(m.client, m.MultiCall, msgs, true)
+		if err != nil {
+			res.Error = err.Error()
+			res.Failed = true
+			return res
+		}
 
-	lggr := m.logger.With().Str("Msg Tx", sendTx.Hash().String()).Logger()
-	txConfirmationTime := time.Now().UTC()
-	rcpt, err1 := bind.WaitMined(context.Background(), m.client.DeployBackend(), sendTx)
-	if err1 == nil {
-		hdr, err1 := m.client.HeaderByNumber(context.Background(), rcpt.BlockNumber)
+		lggr := m.logger.With().Str("Msg Tx", sendTx.Hash().String()).Logger()
+		txConfirmationTime := time.Now().UTC()
+		rcpt, err1 := bind.WaitMined(context.Background(), m.client.DeployBackend(), sendTx)
 		if err1 == nil {
-			txConfirmationTime = hdr.Timestamp
+			hdr, err1 := m.client.HeaderByNumber(context.Background(), rcpt.BlockNumber)
+			if err1 == nil {
+				txConfirmationTime = hdr.Timestamp
+			}
 		}
-	}
-	var gasUsed uint64
-	if rcpt != nil {
-		gasUsed = rcpt.GasUsed
-	}
-	for _, rValues := range returnValuesByDest {
-		if len(rValues.Stats) != len(rValues.Msgs) {
-			res.Error = fmt.Sprintf("number of stats %d and msgs %d should be same", len(rValues.Stats), len(rValues.Msgs))
+		var gasUsed uint64
+		if rcpt != nil {
+			gasUsed = rcpt.GasUsed
+		}
+		for _, rValues := range returnValuesByDest {
+			if len(rValues.Stats) != len(rValues.Msgs) {
+				res.Error = fmt.Sprintf("number of stats %d and msgs %d should be same", len(rValues.Stats), len(rValues.Msgs))
+				res.Failed = true
+				return res
+			}
+			for i, stat := range rValues.Stats {
+				msg := rValues.Msgs[i]
+				stat.UpdateState(lggr, 0, testreporters.TX, startTime.Sub(txConfirmationTime), testreporters.Success,
+					testreporters.TransactionStats{
+						Fee:                msg.Fee.String(),
+						GasUsed:            gasUsed,
+						TxHash:             sendTx.Hash().Hex(),
+						NoOfTokensSent:     len(msg.Msg.TokenAmounts),
+						MessageBytesLength: len(msg.Msg.Data),
+					})
+			}
+		}
+
+		validateGrp := errgroup.Group{}
+		// wait for
+		// - CCIPSendRequested Event log to be generated,
+		for _, rValues := range returnValuesByDest {
+			key := fmt.Sprintf("%s-%s", rValues.Stats[0].SourceNetwork, rValues.Stats[0].DestNetwork)
+			c, ok := m.E2ELoads[key]
+			if !ok {
+				res.Error = fmt.Sprintf("load for %s not found", key)
+				res.Failed = true
+				return res
+			}
+
+			lggr = lggr.With().Str("Source Network", c.Lane.SourceChain.GetNetworkName()).Str("Dest Network", c.Lane.DestChain.GetNetworkName()).Logger()
+			stats := rValues.Stats
+			txConfirmationTime := txConfirmationTime
+			sendTx := sendTx
+			lggr := lggr
+			validateGrp.Go(func() error {
+				return c.Validate(lggr, sendTx, txConfirmationTime, stats)
+			})
+		}
+		err = validateGrp.Wait()
+		if err != nil {
+			res.Error = err.Error()
 			res.Failed = true
 			return res
 		}
-		for i, stat := range rValues.Stats {
-			msg := rValues.Msgs[i]
-			stat.UpdateState(lggr, 0, testreporters.TX, startTime.Sub(txConfirmationTime), testreporters.Success,
-				testreporters.TransactionStats{
-					Fee:                msg.Fee.String(),
-					GasUsed:            gasUsed,
-					TxHash:             sendTx.Hash().Hex(),
-					NoOfTokensSent:     len(msg.Msg.TokenAmounts),
-					MessageBytesLength: len(msg.Msg.Data),
-				})
-		}
 	}
-
-	validateGrp := errgroup.Group{}
-	// wait for
-	// - CCIPSendRequested Event log to be generated,
-	for _, rValues := range returnValuesByDest {
-		key := fmt.Sprintf("%s-%s", rValues.Stats[0].SourceNetwork, rValues.Stats[0].DestNetwork)
-		c, ok := m.E2ELoads[key]
-		if !ok {
-			res.Error = fmt.Sprintf("load for %s not found", key)
-			res.Failed = true
-			return res
-		}
-
-		lggr = lggr.With().Str("Source Network", c.Lane.SourceChain.GetNetworkName()).Str("Dest Network", c.Lane.DestChain.GetNetworkName()).Logger()
-		stats := rValues.Stats
-		txConfirmationTime := txConfirmationTime
-		sendTx := sendTx
-		lggr := lggr
-		validateGrp.Go(func() error {
-			return c.Validate(lggr, sendTx, txConfirmationTime, stats)
-		})
-	}
-	err = validateGrp.Wait()
-	if err != nil {
-		res.Error = err.Error()
-		res.Failed = true
-		return res
-	}
-
 	return res
 }
 
