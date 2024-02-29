@@ -156,7 +156,7 @@ type Common struct {
 	TTL       *config.Duration         `toml:",omitempty"`
 	Chainlink *Chainlink               `toml:",omitempty"`
 	Network   *ctfconfig.NetworkConfig `toml:",omitempty"`
-	Logging   *ctfconfig.LoggingConfig `toml:"Logging"`
+	Logging   *ctfconfig.LoggingConfig `toml:"Logging,omitempty"`
 }
 
 func (p *Common) ApplyOverrides(from *Common) error {
@@ -177,6 +177,9 @@ func (p *Common) ApplyOverrides(from *Common) error {
 			p.Chainlink = &Chainlink{}
 		}
 		p.Chainlink.ApplyOverrides(from.Chainlink)
+	}
+	if from.Logging != nil {
+		p.Logging = from.Logging
 	}
 	return nil
 }
