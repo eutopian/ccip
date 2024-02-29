@@ -256,7 +256,6 @@ func (l *LoadArgs) TriggerLoadBySource() {
 				CallTimeout:           (l.TestCfg.TestGroupInput.PhaseTimeout.Duration()) * 5,
 				Gun:                   multiCallGen,
 				Logger:                multiCallGen.logger,
-				LokiConfig:            wasp.NewEnvLokiConfig(),
 				Labels:                allLabels,
 				FailOnErr:             true,
 			})
