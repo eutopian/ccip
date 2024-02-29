@@ -157,8 +157,8 @@ func (m *CCIPMultiCallLoadGenerator) Call(_ *wasp.Generator) *wasp.Response {
 	startTime := time.Now().UTC()
 	// if msgs contain more than 10 break it down to diff batches of 10 each
 	batches := make(map[int][]contracts.CCIPMsgData)
+	chunkSize := 10
 	if len(msgs) > 10 {
-		chunkSize := 10
 		counter := 1
 		for i := 0; i < len(msgs); i += chunkSize {
 			end := i + chunkSize
