@@ -245,7 +245,7 @@ func (l *LoadArgs) TriggerLoadBySource() {
 			}
 			multiCallGen, err := NewMultiCallLoadGenerator(l.TestCfg, lanes, l.TestCfg.TestGroupInput.RequestPerUnitTime[0], allLabels)
 			require.NoError(l.t, err)
-
+			lokiConfig := l.TestCfg.EnvInput.Logging.Loki
 			loadRunner, err := wasp.NewGenerator(&wasp.Config{
 				T:                     l.TestCfg.Test,
 				GenName:               fmt.Sprintf("Source %s", source),
@@ -256,6 +256,7 @@ func (l *LoadArgs) TriggerLoadBySource() {
 				CallTimeout:           (l.TestCfg.TestGroupInput.PhaseTimeout.Duration()) * 5,
 				Gun:                   multiCallGen,
 				Logger:                multiCallGen.logger,
+				LokiConfig:            wasp.NewLokiConfig(lokiConfig.Endpoint, lokiConfig.TenantId, lokiConfig.BasicAuth, lokiConfig.BearerToken),
 				Labels:                allLabels,
 				FailOnErr:             true,
 			})

@@ -43,8 +43,8 @@ type CCIPMultiCallLoadGenerator struct {
 }
 
 type MultiCallReturnValues struct {
-	Msgs  []contracts.CCIPMsgData
-	Stats []*testreporters.RequestStat
+	Msgs  map[int][]contracts.CCIPMsgData
+	Stats map[int][]*testreporters.RequestStat
 }
 
 func NewMultiCallLoadGenerator(testCfg *testsetups.CCIPTestConfig, lanes []*actions.CCIPLane, noOfRequestsPerUnitTime int64, labels map[string]string) (*CCIPMultiCallLoadGenerator, error) {
@@ -134,10 +134,12 @@ func (m *CCIPMultiCallLoadGenerator) HandleLokiLogs(rValues map[string]MultiCall
 			"test_data_type": "responses",
 			"go_test_name":   model.LabelValue(m.t.Name()),
 		})
-		for _, stat := range rValue.Stats {
-			err := m.loki.HandleStruct(labels, time.Now().UTC(), stat.StatusByPhase)
-			if err != nil {
-				m.logger.Error().Err(err).Msg("error while handling loki logs")
+		for _, allstats := range rValue.Stats {
+			for _, stat := range allstats {
+				err := m.loki.HandleStruct(labels, time.Now().UTC(), stat.StatusByPhase)
+				if err != nil {
+					m.logger.Error().Err(err).Msg("error while handling loki logs")
+				}
 			}
 		}
 	}
@@ -145,7 +147,7 @@ func (m *CCIPMultiCallLoadGenerator) HandleLokiLogs(rValues map[string]MultiCall
 
 func (m *CCIPMultiCallLoadGenerator) Call(_ *wasp.Generator) *wasp.Response {
 	res := &wasp.Response{}
-	msgs, returnValuesByDest, err := m.MergeCalls()
+	msgBatches, returnValuesByDest, err := m.MergeCalls()
 	if err != nil {
 		res.Error = err.Error()
 		res.Failed = true
@@ -154,27 +156,14 @@ func (m *CCIPMultiCallLoadGenerator) Call(_ *wasp.Generator) *wasp.Response {
 	defer func() {
 		m.responses <- returnValuesByDest
 	}()
-	m.logger.Info().Interface("msgs", msgs).Msgf("Sending %d ccip-send calls", len(msgs))
+	source := m.client.GetNetworkName()
+	m.logger.Info().Int("Number of msg Batches", len(msgBatches)).Msgf("Sending ccip-send calls for network %s", source)
 	startTime := time.Now().UTC()
-	// if msgs contain more than 10 break it down to diff batches of 10 each
-	batches := make(map[int][]contracts.CCIPMsgData)
-	chunkSize := 10
-	if len(msgs) > 10 {
-		counter := 1
-		for i := 0; i < len(msgs); i += chunkSize {
-			end := i + chunkSize
-			if end > len(msgs) {
-				end = len(msgs)
-			}
-			batches[counter] = msgs[i:end]
-			counter++
-		}
-	} else {
-		batches[1] = msgs[:]
-	}
+
 	// for now we are using all ccip-sends with native
-	for _, msgs := range batches {
-		sendTx, err := contracts.MultiCallCCIP(m.client, m.MultiCall, msgs, true)
+	for counter, batch := range msgBatches {
+		m.logger.Debug().Interface("msgs in one tx", batch).Msgf("Sending %d ccip-send calls", len(batch))
+		sendTx, err := contracts.MultiCallCCIP(m.client, m.MultiCall, batch, true)
 		if err != nil {
 			res.Error = err.Error()
 			res.Failed = true
@@ -194,14 +183,28 @@ func (m *CCIPMultiCallLoadGenerator) Call(_ *wasp.Generator) *wasp.Response {
 		if rcpt != nil {
 			gasUsed = rcpt.GasUsed
 		}
-		for _, rValues := range returnValuesByDest {
-			if len(rValues.Stats) != len(rValues.Msgs) {
-				res.Error = fmt.Sprintf("number of stats %d and msgs %d should be same", len(rValues.Stats), len(rValues.Msgs))
+		validateGrp := errgroup.Group{}
+		for dest, mcReturnValues := range returnValuesByDest {
+			// locate the batch in returnValuesByDest for the destination
+			allStats, statsexists := mcReturnValues.Stats[counter]
+			allMsgs, msgsexists := mcReturnValues.Msgs[counter]
+
+			if statsexists != msgsexists {
+				res.Error = fmt.Sprintf("msgs and stats does not match for batch num %d for lane %s-->%s", counter, source, dest)
 				res.Failed = true
 				return res
 			}
-			for i, stat := range rValues.Stats {
-				msg := rValues.Msgs[i]
+			if !statsexists {
+				continue
+			}
+
+			if len(allStats) != len(allMsgs) {
+				res.Error = fmt.Sprintf("number of stats %d and msgs %d should be same", len(allStats), len(allMsgs))
+				res.Failed = true
+				return res
+			}
+			for i, stat := range allStats {
+				msg := allMsgs[i]
 				stat.UpdateState(lggr, 0, testreporters.TX, startTime.Sub(txConfirmationTime), testreporters.Success,
 					testreporters.TransactionStats{
 						Fee:                msg.Fee.String(),
@@ -211,13 +214,8 @@ func (m *CCIPMultiCallLoadGenerator) Call(_ *wasp.Generator) *wasp.Response {
 						MessageBytesLength: len(msg.Msg.Data),
 					})
 			}
-		}
 
-		validateGrp := errgroup.Group{}
-		// wait for
-		// - CCIPSendRequested Event log to be generated,
-		for _, rValues := range returnValuesByDest {
-			key := fmt.Sprintf("%s-%s", rValues.Stats[0].SourceNetwork, rValues.Stats[0].DestNetwork)
+			key := fmt.Sprintf("%s-%s", allStats[0].SourceNetwork, allStats[0].DestNetwork)
 			c, ok := m.E2ELoads[key]
 			if !ok {
 				res.Error = fmt.Sprintf("load for %s not found", key)
@@ -226,7 +224,7 @@ func (m *CCIPMultiCallLoadGenerator) Call(_ *wasp.Generator) *wasp.Response {
 			}
 
 			lggr = lggr.With().Str("Source Network", c.Lane.SourceChain.GetNetworkName()).Str("Dest Network", c.Lane.DestChain.GetNetworkName()).Logger()
-			stats := rValues.Stats
+			stats := allStats
 			txConfirmationTime := txConfirmationTime
 			sendTx := sendTx
 			lggr := lggr
@@ -244,10 +242,10 @@ func (m *CCIPMultiCallLoadGenerator) Call(_ *wasp.Generator) *wasp.Response {
 	return res
 }
 
-func (m *CCIPMultiCallLoadGenerator) MergeCalls() ([]contracts.CCIPMsgData, map[string]MultiCallReturnValues, error) {
-	var ccipMsgs []contracts.CCIPMsgData
+func (m *CCIPMultiCallLoadGenerator) MergeCalls() (map[int][]contracts.CCIPMsgData, map[string]MultiCallReturnValues, error) {
+	ccipMsgs := make(map[int][]contracts.CCIPMsgData)
 	statDetails := make(map[string]MultiCallReturnValues)
-
+	batchNum := 1
 	for _, e2eLoad := range m.E2ELoads {
 		destChainSelector, err := chain_selectors.SelectorFromChainId(e2eLoad.Lane.Source.DestinationChainId)
 		if err != nil {
@@ -255,8 +253,8 @@ func (m *CCIPMultiCallLoadGenerator) MergeCalls() ([]contracts.CCIPMsgData, map[
 		}
 
 		allFee := big.NewInt(0)
-		var allStatsForDest []*testreporters.RequestStat
-		var allMsgsForDest []contracts.CCIPMsgData
+		allStatsForDest := make(map[int][]*testreporters.RequestStat)
+		allMsgsForDest := make(map[int][]contracts.CCIPMsgData)
 		for i := int64(0); i < m.NoOfRequestsPerUnitTime; i++ {
 			msg, stats := e2eLoad.CCIPMsg()
 			msg.FeeToken = common.Address{}
@@ -274,10 +272,17 @@ func (m *CCIPMultiCallLoadGenerator) MergeCalls() ([]contracts.CCIPMsgData, map[
 				Msg:           msg,
 				Fee:           fee,
 			}
-			ccipMsgs = append(ccipMsgs, msgData)
-
-			allStatsForDest = append(allStatsForDest, stats)
-			allMsgsForDest = append(allMsgsForDest, msgData)
+			// if length of the batch exceeds 10 create another batch
+			if _, exists := ccipMsgs[batchNum]; exists && len(ccipMsgs[batchNum]) > 10 {
+				batchNum++
+				ccipMsgs[batchNum] = []contracts.CCIPMsgData{msgData}
+				allStatsForDest[batchNum] = []*testreporters.RequestStat{stats}
+				allMsgsForDest[batchNum] = []contracts.CCIPMsgData{msgData}
+			} else {
+				ccipMsgs[batchNum] = append(ccipMsgs[batchNum], msgData)
+				allStatsForDest[batchNum] = append(allStatsForDest[batchNum], stats)
+				allMsgsForDest[batchNum] = append(allMsgsForDest[batchNum], msgData)
+			}
 		}
 		statDetails[e2eLoad.Lane.DestNetworkName] = MultiCallReturnValues{
 			Stats: allStatsForDest,
