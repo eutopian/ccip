@@ -36,6 +36,7 @@ type CCIPTestConfig struct {
 	MaxNoOfLanes               int                `toml:",omitempty"`
 	ChaosDuration              *config.Duration   `toml:",omitempty"`
 	USDCMockDeployment         *bool              `toml:",omitempty"`
+	ChunkSizeInMulticall       *int               `toml:",omitempty"`
 }
 
 func (c *CCIPTestConfig) ApplyOverrides(fromCfg *CCIPTestConfig) error {
@@ -128,7 +129,9 @@ func (c *CCIPTestConfig) ApplyOverrides(fromCfg *CCIPTestConfig) error {
 	if fromCfg.USDCMockDeployment != nil {
 		c.USDCMockDeployment = fromCfg.USDCMockDeployment
 	}
-
+	if fromCfg.ChunkSizeInMulticall != nil {
+		c.ChunkSizeInMulticall = fromCfg.ChunkSizeInMulticall
+	}
 	return nil
 }
 

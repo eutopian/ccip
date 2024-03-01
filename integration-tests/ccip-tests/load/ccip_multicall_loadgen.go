@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AlekSi/pointer"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/prometheus/common/model"
@@ -35,6 +36,7 @@ type CCIPMultiCallLoadGenerator struct {
 	client                  blockchain.EVMClient
 	E2ELoads                map[string]*CCIPE2ELoad
 	MultiCall               string
+	ChunkSize               *int
 	NoOfRequestsPerUnitTime int64
 	labels                  model.LabelSet
 	loki                    *wasp.LokiClient
@@ -76,6 +78,7 @@ func NewMultiCallLoadGenerator(testCfg *testsetups.CCIPTestConfig, lanes []*acti
 		MultiCall:               multiCall,
 		logger:                  lggr,
 		NoOfRequestsPerUnitTime: noOfRequestsPerUnitTime,
+		ChunkSize:               testCfg.TestGroupInput.ChunkSizeInMulticall,
 		E2ELoads:                make(map[string]*CCIPE2ELoad),
 		labels:                  ls,
 		loki:                    loki,
@@ -247,7 +250,9 @@ func (m *CCIPMultiCallLoadGenerator) MergeCalls() (map[int][]contracts.CCIPMsgDa
 	statDetails := make(map[string]MultiCallReturnValues)
 	batchNum := 1
 	chunksize := 2
-
+	if m.ChunkSize != nil {
+		chunksize = pointer.GetInt(m.ChunkSize)
+	}
 	for _, e2eLoad := range m.E2ELoads {
 		destChainSelector, err := chain_selectors.SelectorFromChainId(e2eLoad.Lane.Source.DestinationChainId)
 		if err != nil {
