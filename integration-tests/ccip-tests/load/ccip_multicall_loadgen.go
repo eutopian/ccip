@@ -59,7 +59,7 @@ func NewMultiCallLoadGenerator(testCfg *testsetups.CCIPTestConfig, lanes []*acti
 			return nil, fmt.Errorf("all lanes should be from same network; expected %s, got %s", source, lanes[i].SourceChain.GetChainID())
 		}
 		if lanes[i].SrcNetworkLaneCfg.Multicall != multiCall {
-			return nil, fmt.Errorf("multicall address should be same for all lanes")
+			lanes[i].SrcNetworkLaneCfg.Multicall = multiCall
 		}
 	}
 	client := lanes[0].SourceChain

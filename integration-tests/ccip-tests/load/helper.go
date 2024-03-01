@@ -217,13 +217,15 @@ func (l *LoadArgs) TriggerLoadBySource() {
 
 	var laneBySource = make(map[string][]*actions.CCIPLane)
 	for _, lane := range l.TestSetupArgs.Lanes {
-		laneBySource[lane.ForwardLane.SourceNetworkName] = append(laneBySource[lane.ForwardLane.SourceNetworkName], lane.ForwardLane)
+		chainId := lane.ForwardLane.SourceChain.GetChainID().String()
+		laneBySource[chainId] = append(laneBySource[chainId], lane.ForwardLane)
 		if lane.ReverseLane != nil {
-			laneBySource[lane.ReverseLane.SourceNetworkName] = append(laneBySource[lane.ReverseLane.SourceNetworkName], lane.ReverseLane)
+			chainId := lane.ReverseLane.SourceChain.GetChainID().String()
+			laneBySource[chainId] = append(laneBySource[chainId], lane.ReverseLane)
 		}
 	}
-	for source, lanes := range laneBySource {
-		source := source
+	for _, lanes := range laneBySource {
+		source := lanes[0].SourceNetworkName
 		lanes := lanes
 		l.LoadStarterWg.Add(1)
 		go func() {
