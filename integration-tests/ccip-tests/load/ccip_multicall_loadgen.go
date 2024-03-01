@@ -246,6 +246,8 @@ func (m *CCIPMultiCallLoadGenerator) MergeCalls() (map[int][]contracts.CCIPMsgDa
 	ccipMsgs := make(map[int][]contracts.CCIPMsgData)
 	statDetails := make(map[string]MultiCallReturnValues)
 	batchNum := 1
+	chunksize := 2
+
 	for _, e2eLoad := range m.E2ELoads {
 		destChainSelector, err := chain_selectors.SelectorFromChainId(e2eLoad.Lane.Source.DestinationChainId)
 		if err != nil {
@@ -272,8 +274,9 @@ func (m *CCIPMultiCallLoadGenerator) MergeCalls() (map[int][]contracts.CCIPMsgDa
 				Msg:           msg,
 				Fee:           fee,
 			}
+
 			// if length of the batch exceeds 10 create another batch
-			if _, exists := ccipMsgs[batchNum]; exists && len(ccipMsgs[batchNum]) > 10 {
+			if _, exists := ccipMsgs[batchNum]; exists && len(ccipMsgs[batchNum]) > chunksize {
 				batchNum++
 				ccipMsgs[batchNum] = []contracts.CCIPMsgData{msgData}
 				allStatsForDest[batchNum] = []*testreporters.RequestStat{stats}
