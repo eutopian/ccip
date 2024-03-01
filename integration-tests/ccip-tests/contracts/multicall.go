@@ -103,6 +103,10 @@ func WaitForSuccessfulTxMined(evmClient blockchain.EVMClient, tx *types.Transact
 		return err
 	}
 	if receipt.Status != types.ReceiptStatusSuccessful {
+		errReason, v, err := evmClient.RevertReasonFromTx(tx.Hash(), MultiCallABI)
+		if err != nil {
+			return fmt.Errorf("tx=%s failed - %s args %v", tx.Hash().Hex(), errReason, v)
+		}
 		return fmt.Errorf("tx failed %s", tx.Hash().Hex())
 	}
 	log.Info().Str("tx", tx.Hash().Hex()).Str("Network", evmClient.GetNetworkName()).Msg("tx mined successfully")
