@@ -496,6 +496,4 @@ replace (
 	github.com/prometheus/prometheus => github.com/prometheus/prometheus v0.47.2-0.20231010075449-4b9c19fe5510
 
 	github.com/smartcontractkit/chainlink/integration-tests => ../integration-tests
-
-	k8s.io/apimachinery => k8s.io/apimachinery v0.25.11
 )
