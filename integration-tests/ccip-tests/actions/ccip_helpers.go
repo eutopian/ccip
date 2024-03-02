@@ -42,6 +42,7 @@ import (
 	"github.com/smartcontractkit/chainlink/integration-tests/ccip-tests/contracts/laneconfig"
 	"github.com/smartcontractkit/chainlink/integration-tests/ccip-tests/testconfig"
 	"github.com/smartcontractkit/chainlink/integration-tests/ccip-tests/testreporters"
+	testutils "github.com/smartcontractkit/chainlink/integration-tests/ccip-tests/utils"
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
 	"github.com/smartcontractkit/chainlink/integration-tests/docker/test_env"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
@@ -2329,6 +2330,8 @@ func (lane *CCIPLane) StartEventWatchers() error {
 			} else {
 				lane.Source.CCIPSendRequestedWatcher.Store(e.Raw.TxHash.Hex(), []*evm_2_evm_onramp.EVM2EVMOnRampCCIPSendRequested{e})
 			}
+
+			lane.Source.CCIPSendRequestedWatcher = testutils.DeleteNilEntriesFromMap(lane.Source.CCIPSendRequestedWatcher)
 		}
 	}()
 	reportAcceptedEvent := make(chan *commit_store.CommitStoreReportAccepted)
@@ -2345,6 +2348,7 @@ func (lane *CCIPLane) StartEventWatchers() error {
 			for i := e.Report.Interval.Min; i <= e.Report.Interval.Max; i++ {
 				lane.Dest.ReportAcceptedWatcher.Store(i, e)
 			}
+			lane.Dest.ReportAcceptedWatcher = testutils.DeleteNilEntriesFromMap(lane.Dest.ReportAcceptedWatcher)
 		}
 	}()
 
@@ -2364,6 +2368,7 @@ func (lane *CCIPLane) StartEventWatchers() error {
 				if e.TaggedRoot.CommitStore == lane.Dest.CommitStore.EthAddress {
 					lane.Dest.ReportBlessedWatcher.Store(e.TaggedRoot.Root, &e.Raw)
 				}
+				lane.Dest.ReportBlessedWatcher = testutils.DeleteNilEntriesFromMap(lane.Dest.ReportBlessedWatcher)
 			}
 		}()
 	}
@@ -2380,6 +2385,7 @@ func (lane *CCIPLane) StartEventWatchers() error {
 			e := <-execStateChangedEvent
 			lane.Logger.Info().Msgf("Execution state changed event received for seq number %d", e.SequenceNumber)
 			lane.Dest.ExecStateChangedWatcher.Store(e.SequenceNumber, e)
+			lane.Dest.ExecStateChangedWatcher = testutils.DeleteNilEntriesFromMap(lane.Dest.ExecStateChangedWatcher)
 		}
 	}()
 	return nil
