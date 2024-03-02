@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/AlekSi/pointer"
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -37,7 +38,6 @@ import (
 	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
 	"github.com/smartcontractkit/chainlink-testing-framework/k8s/environment"
 
-	"github.com/smartcontractkit/chainlink/integration-tests/actions"
 	"github.com/smartcontractkit/chainlink/integration-tests/ccip-tests/contracts"
 	"github.com/smartcontractkit/chainlink/integration-tests/ccip-tests/contracts/laneconfig"
 	"github.com/smartcontractkit/chainlink/integration-tests/ccip-tests/testconfig"
@@ -144,6 +144,18 @@ type CCIPCommon struct {
 	gasUpdateWatcherMu *sync.Mutex
 	gasUpdateWatcher   map[uint64]*big.Int // key - destchain id; value - timestamp of update
 	priceUpdateSubs    []event.Subscription
+}
+
+// FreeUpUnusedSpace sets nil to various elements of ccipModule which are only used
+// during lane set up and not used for rest of the test duration
+// this is called mainly by load test to keep the memory usage minimum for high number of lanes
+func (ccipModule *CCIPCommon) FreeUpUnusedSpace() {
+	ccipModule.PriceAggregators = nil
+	ccipModule.BridgeTokenPools = []*contracts.TokenPool{}
+	ccipModule.gasUpdateWatcher = nil
+	ccipModule.gasUpdateWatcherMu = nil
+	ccipModule.TokenMessenger = nil
+	ccipModule.PriceRegistry = nil
 }
 
 func (ccipModule *CCIPCommon) StopWatchingPriceUpdates() {
@@ -2990,24 +3002,48 @@ func (c *CCIPTestEnv) SetUpNodeKeysAndFund(
 			}
 		}()
 		log.Info().Str("chain id", c1.GetChainID().String()).Msg("Funding Chainlink nodes for chain")
-		err = actions.FundChainlinkNodesAddresses(chainlinkNodes[1:], c1, nodeFund)
-		if err != nil {
-			return fmt.Errorf("funding nodes for chain %s %w", c1.GetNetworkName(), err)
+		for i := 1; i < len(chainlinkNodes); i++ {
+			cl := chainlinkNodes[i]
+			m := c.nodeMutexes[i]
+			toAddress, err := cl.EthAddressesForChain(c1.GetChainID().String())
+			if err != nil {
+				return err
+			}
+			for _, addr := range toAddress {
+				toAddr := common.HexToAddress(addr)
+				gasEstimates, err := c1.EstimateGas(ethereum.CallMsg{
+					To: &toAddr,
+				})
+				if err != nil {
+					return err
+				}
+				m.Lock()
+				err = c1.Fund(addr, nodeFund, gasEstimates)
+				m.Unlock()
+				if err != nil {
+					return err
+				}
+			}
 		}
-		return nil
+		return c1.WaitForEvents()
 	}
-
+	grp, _ := errgroup.WithContext(context.Background())
 	for _, chain := range chains {
 		err := populateKeys(chain)
 		if err != nil {
 			return err
 		}
-		err = fund(chain)
-		if err != nil {
-			return err
-		}
 	}
-
+	for _, chain := range chains {
+		chain := chain
+		grp.Go(func() error {
+			return fund(chain)
+		})
+	}
+	err := grp.Wait()
+	if err != nil {
+		return fmt.Errorf("error funding nodes %w", err)
+	}
 	c.CLNodesWithKeys = nodesWithKeys
 
 	return nil

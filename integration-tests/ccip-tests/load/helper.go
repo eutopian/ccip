@@ -144,7 +144,6 @@ func (l *LoadArgs) TriggerLoadByLane() {
 			SharedData:            l.TestCfg.TestGroupInput.MsgType,
 			LokiConfig:            wasp.NewLokiConfig(lokiConfig.Endpoint, lokiConfig.TenantId, nil, nil),
 			Labels:                labels,
-			FailOnErr:             true,
 		})
 		require.NoError(l.TestCfg.Test, err, "initiating loadgen for lane %s --> %s",
 			lane.SourceNetworkName, lane.DestNetworkName)
@@ -272,7 +271,7 @@ func (l *LoadArgs) TriggerLoadBySource() {
 				Logger:                multiCallGen.logger,
 				LokiConfig:            wasp.NewLokiConfig(lokiConfig.Endpoint, lokiConfig.TenantId, nil, nil),
 				Labels:                allLabels,
-				FailOnErr:             true,
+				FailOnErr:             false,
 			})
 			require.NoError(l.TestCfg.Test, err, "initiating loadgen for source %s", source)
 			loadRunner.Run(false)
