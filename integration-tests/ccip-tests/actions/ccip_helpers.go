@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AlekSi/pointer"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -39,7 +40,9 @@ import (
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
 	"github.com/smartcontractkit/chainlink/integration-tests/ccip-tests/contracts"
 	"github.com/smartcontractkit/chainlink/integration-tests/ccip-tests/contracts/laneconfig"
+	"github.com/smartcontractkit/chainlink/integration-tests/ccip-tests/testconfig"
 	"github.com/smartcontractkit/chainlink/integration-tests/ccip-tests/testreporters"
+	testutils "github.com/smartcontractkit/chainlink/integration-tests/ccip-tests/utils"
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
 	"github.com/smartcontractkit/chainlink/integration-tests/docker/test_env"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
@@ -147,6 +150,8 @@ func (ccipModule *CCIPCommon) StopWatchingPriceUpdates() {
 	for _, sub := range ccipModule.priceUpdateSubs {
 		sub.Unsubscribe()
 	}
+	ccipModule.gasUpdateWatcher = nil
+	ccipModule.gasUpdateWatcherMu = nil
 }
 
 func (ccipModule *CCIPCommon) Copy(logger zerolog.Logger, chainClient blockchain.EVMClient) (*CCIPCommon, error) {
@@ -410,6 +415,7 @@ func (ccipModule *CCIPCommon) WaitForPriceUpdates(
 					Uint64("dest chain", destChainId).
 					Str("source chain", ccipModule.ChainClient.GetNetworkName()).
 					Msg("Price updated")
+
 				return nil
 			}
 		case <-ctx.Done():
@@ -1021,17 +1027,18 @@ func (sourceCCIP *SourceCCIPModule) DeployContracts(lane *laneconfig.LaneConfig)
 			return fmt.Errorf("getting new onramp contractshouldn't fail %w", err)
 		}
 	}
-
-	// set remote chain on the pools
-	for _, pool := range sourceCCIP.Common.BridgeTokenPools {
-		err = pool.SetRemoteChainOnPool(sourceCCIP.DestChainSelector)
-		if err != nil {
-			return fmt.Errorf("setting remote chain on the bridge token pool shouldn't fail %w", err)
+	if !sourceCCIP.Common.ExistingDeployment {
+		// set remote chain on the pools
+		for _, pool := range sourceCCIP.Common.BridgeTokenPools {
+			err = pool.SetRemoteChainOnPool(sourceCCIP.DestChainSelector)
+			if err != nil {
+				return fmt.Errorf("setting remote chain on the bridge token pool shouldn't fail %w", err)
+			}
 		}
-	}
-	err = sourceCCIP.Common.ChainClient.WaitForEvents()
-	if err != nil {
-		return fmt.Errorf("waiting for events shouldn't fail %w", err)
+		err = sourceCCIP.Common.ChainClient.WaitForEvents()
+		if err != nil {
+			return fmt.Errorf("waiting for events shouldn't fail %w", err)
+		}
 	}
 	return nil
 }
@@ -1322,6 +1329,7 @@ type DestCCIPModule struct {
 	ReportAcceptedWatcher   *sync.Map
 	ExecStateChangedWatcher *sync.Map
 	ReportBlessedWatcher    *sync.Map
+	ReportBlessedBySeqNum   *sync.Map
 	NextSeqNumToCommit      *atomic.Uint64
 }
 
@@ -1454,12 +1462,13 @@ func (destCCIP *DestCCIPModule) DeployContracts(
 			return fmt.Errorf("getting new offramp shouldn't fail %w", err)
 		}
 	}
-
-	// update pools with remote chain
-	for _, pool := range destCCIP.Common.BridgeTokenPools {
-		err = pool.SetRemoteChainOnPool(destCCIP.SourceChainSelector)
-		if err != nil {
-			return fmt.Errorf("setting remote chain on the bridge token pool shouldn't fail %w", err)
+	if !destCCIP.Common.ExistingDeployment {
+		// update pools with remote chain
+		for _, pool := range destCCIP.Common.BridgeTokenPools {
+			err = pool.SetRemoteChainOnPool(destCCIP.SourceChainSelector)
+			if err != nil {
+				return fmt.Errorf("setting remote chain on the bridge token pool shouldn't fail %w", err)
+			}
 		}
 	}
 	if destCCIP.ReceiverDapp == nil {
@@ -1694,13 +1703,30 @@ func (destCCIP *DestCCIPModule) AssertReportBlessed(
 	for {
 		select {
 		case <-ticker.C:
-			value, ok := destCCIP.ReportBlessedWatcher.Load(CommitReport.MerkleRoot)
+			var value any
+			var foundAsRoot, ok bool
+			value, foundAsRoot = destCCIP.ReportBlessedWatcher.Load(CommitReport.MerkleRoot)
 			receivedAt := time.Now().UTC()
+			ok = foundAsRoot
+			if !foundAsRoot {
+				// if the value is not found as root, check if it is found as sequence number
+				value, ok = destCCIP.ReportBlessedBySeqNum.Load(seqNum)
+			}
 			if ok && value != nil {
 				vLogs, exists := value.(*types.Log)
 				if exists {
-					// if the value is processed, delete it from the map
-					destCCIP.ReportBlessedWatcher.Delete(CommitReport.MerkleRoot)
+					// if the root is found, set the value for all the sequence numbers in the interval and delete the root from the map
+					if foundAsRoot {
+						// set the value for all the sequence numbers in the interval
+						for i := CommitReport.Interval.Min; i <= CommitReport.Interval.Max; i++ {
+							destCCIP.ReportBlessedBySeqNum.Store(i, vLogs)
+						}
+						// if the value is processed, delete it from the map
+						destCCIP.ReportBlessedWatcher.Delete(CommitReport.MerkleRoot)
+					} else {
+						// if the value is processed, delete it from the map
+						destCCIP.ReportBlessedBySeqNum.Delete(seqNum)
+					}
 					hdr, err := destCCIP.Common.ChainClient.HeaderByNumber(ctx, big.NewInt(int64(vLogs.BlockNumber)))
 					if err == nil {
 						receivedAt = hdr.Timestamp
@@ -1782,6 +1808,7 @@ func DefaultDestinationCCIPModule(logger zerolog.Logger, chainClient blockchain.
 		SourceNetworkName:       sourceChain,
 		NextSeqNumToCommit:      atomic.NewUint64(1),
 		ReportBlessedWatcher:    &sync.Map{},
+		ReportBlessedBySeqNum:   &sync.Map{},
 		ExecStateChangedWatcher: &sync.Map{},
 		ReportAcceptedWatcher:   &sync.Map{},
 	}, nil
@@ -1813,27 +1840,24 @@ func CCIPRequestFromTxHash(txHash common.Hash, chainClient blockchain.EVMClient)
 }
 
 type CCIPLane struct {
-	Test                    *testing.T
-	Logger                  zerolog.Logger
-	SourceNetworkName       string
-	DestNetworkName         string
-	SourceChain             blockchain.EVMClient
-	DestChain               blockchain.EVMClient
-	Source                  *SourceCCIPModule
-	Dest                    *DestCCIPModule
-	TestEnv                 *CCIPTestEnv
-	NumberOfReq             int
-	Reports                 *testreporters.CCIPLaneStats
-	Balance                 *BalanceSheet
-	StartBlockOnSource      uint64
-	StartBlockOnDestination uint64
-	SentReqs                map[common.Hash][]CCIPRequest
-	TotalFee                *big.Int // total fee for all the requests. Used for balance validation.
-	ValidationTimeout       time.Duration
-	Context                 context.Context
-	SrcNetworkLaneCfg       *laneconfig.LaneConfig
-	DstNetworkLaneCfg       *laneconfig.LaneConfig
-	Subscriptions           []event.Subscription
+	Test              *testing.T
+	Logger            zerolog.Logger
+	SourceNetworkName string
+	DestNetworkName   string
+	SourceChain       blockchain.EVMClient
+	DestChain         blockchain.EVMClient
+	Source            *SourceCCIPModule
+	Dest              *DestCCIPModule
+	NumberOfReq       int
+	Reports           *testreporters.CCIPLaneStats
+	Balance           *BalanceSheet
+	SentReqs          map[common.Hash][]CCIPRequest
+	TotalFee          *big.Int // total fee for all the requests. Used for balance validation.
+	ValidationTimeout time.Duration
+	Context           context.Context
+	SrcNetworkLaneCfg *laneconfig.LaneConfig
+	DstNetworkLaneCfg *laneconfig.LaneConfig
+	Subscriptions     []event.Subscription
 }
 
 func (lane *CCIPLane) TokenPricesConfig() (string, error) {
@@ -1936,10 +1960,6 @@ func (lane *CCIPLane) RecordStateBeforeTransfer() {
 	lane.Balance.RecordBalance(bal)
 
 	// save the current block numbers to use in various filter log requests
-	lane.StartBlockOnSource, err = lane.Source.Common.ChainClient.LatestBlockNumber(context.Background())
-	require.NoError(lane.Test, err, "Getting current block should be successful in source chain")
-	lane.StartBlockOnDestination, err = lane.Dest.Common.ChainClient.LatestBlockNumber(context.Background())
-	require.NoError(lane.Test, err, "Getting current block should be successful in dest chain")
 	lane.TotalFee = big.NewInt(0)
 	lane.NumberOfReq = 0
 	lane.SentReqs = make(map[common.Hash][]CCIPRequest)
@@ -2306,6 +2326,8 @@ func (lane *CCIPLane) StartEventWatchers() error {
 			} else {
 				lane.Source.CCIPSendRequestedWatcher.Store(e.Raw.TxHash.Hex(), []*evm_2_evm_onramp.EVM2EVMOnRampCCIPSendRequested{e})
 			}
+
+			lane.Source.CCIPSendRequestedWatcher = testutils.DeleteNilEntriesFromMap(lane.Source.CCIPSendRequestedWatcher)
 		}
 	}()
 	reportAcceptedEvent := make(chan *commit_store.CommitStoreReportAccepted)
@@ -2322,6 +2344,7 @@ func (lane *CCIPLane) StartEventWatchers() error {
 			for i := e.Report.Interval.Min; i <= e.Report.Interval.Max; i++ {
 				lane.Dest.ReportAcceptedWatcher.Store(i, e)
 			}
+			lane.Dest.ReportAcceptedWatcher = testutils.DeleteNilEntriesFromMap(lane.Dest.ReportAcceptedWatcher)
 		}
 	}()
 
@@ -2341,6 +2364,7 @@ func (lane *CCIPLane) StartEventWatchers() error {
 				if e.TaggedRoot.CommitStore == lane.Dest.CommitStore.EthAddress {
 					lane.Dest.ReportBlessedWatcher.Store(e.TaggedRoot.Root, &e.Raw)
 				}
+				lane.Dest.ReportBlessedWatcher = testutils.DeleteNilEntriesFromMap(lane.Dest.ReportBlessedWatcher)
 			}
 		}()
 	}
@@ -2357,6 +2381,7 @@ func (lane *CCIPLane) StartEventWatchers() error {
 			e := <-execStateChangedEvent
 			lane.Logger.Info().Msgf("Execution state changed event received for seq number %d", e.SequenceNumber)
 			lane.Dest.ExecStateChangedWatcher.Store(e.SequenceNumber, e)
+			lane.Dest.ExecStateChangedWatcher = testutils.DeleteNilEntriesFromMap(lane.Dest.ExecStateChangedWatcher)
 		}
 	}()
 	return nil
@@ -2388,7 +2413,7 @@ func (lane *CCIPLane) CleanUp(clearFees bool) error {
 // DeployNewCCIPLane sets up a lane and initiates lane.Source and lane.Destination
 // If configureCLNodes is true it sets up jobs and contract config for the lane
 func (lane *CCIPLane) DeployNewCCIPLane(
-	numOfCommitNodes int,
+	env *CCIPTestEnv,
 	commitAndExecOnSameDON bool,
 	sourceCommon *CCIPCommon,
 	destCommon *CCIPCommon,
@@ -2399,7 +2424,6 @@ func (lane *CCIPLane) DeployNewCCIPLane(
 	withPipeline bool,
 ) (*laneconfig.LaneConfig, *laneconfig.LaneConfig, error) {
 	var err error
-	env := lane.TestEnv
 	sourceChainClient := lane.SourceChain
 	destChainClient := lane.DestChain
 
@@ -2473,32 +2497,16 @@ func (lane *CCIPLane) DeployNewCCIPLane(
 	if !exists {
 		return lane.SrcNetworkLaneCfg, lane.DstNetworkLaneCfg, fmt.Errorf("could not find CL nodes for %s", lane.Dest.Common.ChainClient.GetChainID().String())
 	}
-
-	// first node is the bootstrapper
 	bootstrapCommit := clNodes[0]
 	var bootstrapExec *client.CLNodesWithKeys
-	var execNodes []*client.CLNodesWithKeys
-	commitNodes := clNodes[1:]
-	env.commitNodeStartIndex = 2
-	env.execNodeStartIndex = 2
-	env.numOfCommitNodes = numOfCommitNodes
-	env.numOfExecNodes = numOfCommitNodes
+	commitNodes := clNodes[env.CommitNodeStartIndex : env.CommitNodeStartIndex+env.NumOfCommitNodes]
+	execNodes := clNodes[env.ExecNodeStartIndex : env.ExecNodeStartIndex+env.NumOfExecNodes]
 	if !commitAndExecOnSameDON {
 		if len(clNodes) < 11 {
 			return lane.SrcNetworkLaneCfg, lane.DstNetworkLaneCfg, fmt.Errorf("not enough CL nodes for separate commit and execution nodes")
 		}
 		bootstrapExec = clNodes[1] // for a set-up of different commit and execution nodes second node is the bootstrapper for execution nodes
-		commitNodes = clNodes[2 : 2+numOfCommitNodes]
-		execNodes = clNodes[2+numOfCommitNodes:]
-		env.commitNodeStartIndex = 3
-		env.execNodeStartIndex = 3 + numOfCommitNodes
-		env.numOfCommitNodes = len(commitNodes)
-		env.numOfExecNodes = len(execNodes)
-	} else {
-		execNodes = commitNodes
 	}
-	env.numOfAllowedFaultyExec = (len(execNodes) - 1) / 3
-	env.numOfAllowedFaultyCommit = (len(commitNodes) - 1) / 3
 
 	// save the current block numbers. If there is a delay between job start up and ocr config set up, the jobs will
 	// replay the log polling from these mentioned block number. The dest block number should ideally be the block number on which
@@ -2800,12 +2808,12 @@ type CCIPTestEnv struct {
 	CLNodesWithKeys          map[string][]*client.CLNodesWithKeys // key - network chain-id
 	CLNodes                  []*client.ChainlinkK8sClient
 	nodeMutexes              []*sync.Mutex
-	execNodeStartIndex       int
-	commitNodeStartIndex     int
-	numOfAllowedFaultyCommit int
-	numOfAllowedFaultyExec   int
-	numOfCommitNodes         int
-	numOfExecNodes           int
+	ExecNodeStartIndex       int
+	CommitNodeStartIndex     int
+	NumOfAllowedFaultyCommit int
+	NumOfAllowedFaultyExec   int
+	NumOfCommitNodes         int
+	NumOfExecNodes           int
 	K8Env                    *environment.Environment
 	CLNodeWithKeyReady       *errgroup.Group // denotes if keys are created in chainlink node and ready to be used for job creation
 }
@@ -2835,62 +2843,83 @@ func (c *CCIPTestEnv) ChaosLabelForAllGeth(t *testing.T, gethNetworksLabels []st
 }
 
 func (c *CCIPTestEnv) ChaosLabelForCLNodes(t *testing.T) {
-	allowedFaulty := c.numOfAllowedFaultyCommit
-	for i := c.commitNodeStartIndex; i < len(c.CLNodes); i++ {
+	allowedFaulty := c.NumOfAllowedFaultyCommit
+	commitStartInstance := c.CommitNodeStartIndex + 1
+	execStartInstance := c.ExecNodeStartIndex + 1
+	for i := commitStartInstance; i < len(c.CLNodes); i++ {
 		labelSelector := map[string]string{
 			"app":      "chainlink-0",
 			"instance": fmt.Sprintf("node-%d", i),
 		}
-		if i >= c.commitNodeStartIndex && i < c.commitNodeStartIndex+allowedFaulty+1 {
+		if i >= commitStartInstance && i < commitStartInstance+allowedFaulty+1 {
 			err := c.K8Env.Client.LabelChaosGroupByLabels(c.K8Env.Cfg.Namespace, labelSelector, ChaosGroupCommitAndExecFaultyPlus)
 			require.NoError(t, err)
 		}
-		if i >= c.commitNodeStartIndex && i < c.commitNodeStartIndex+allowedFaulty {
+		if i >= commitStartInstance && i < commitStartInstance+allowedFaulty {
 			err := c.K8Env.Client.LabelChaosGroupByLabels(c.K8Env.Cfg.Namespace, labelSelector, ChaosGroupCommitAndExecFaulty)
 			require.NoError(t, err)
 		}
 
 		// commit node starts from index 2
-		if i >= c.commitNodeStartIndex && i < c.commitNodeStartIndex+c.numOfCommitNodes {
+		if i >= commitStartInstance && i < commitStartInstance+c.NumOfCommitNodes {
 			err := c.K8Env.Client.LabelChaosGroupByLabels(c.K8Env.Cfg.Namespace, labelSelector, ChaosGroupCommit)
 			require.NoError(t, err)
 		}
-		if i >= c.commitNodeStartIndex && i < c.commitNodeStartIndex+c.numOfAllowedFaultyCommit+1 {
+		if i >= commitStartInstance && i < commitStartInstance+c.NumOfAllowedFaultyCommit+1 {
 			err := c.K8Env.Client.LabelChaosGroupByLabels(c.K8Env.Cfg.Namespace, labelSelector, ChaosGroupCommitFaultyPlus)
 			require.NoError(t, err)
 		}
-		if i >= c.commitNodeStartIndex && i < c.commitNodeStartIndex+c.numOfAllowedFaultyCommit {
+		if i >= commitStartInstance && i < commitStartInstance+c.NumOfAllowedFaultyCommit {
 			err := c.K8Env.Client.LabelChaosGroupByLabels(c.K8Env.Cfg.Namespace, labelSelector, ChaosGroupCommitFaulty)
 			require.NoError(t, err)
 		}
-		if i >= c.execNodeStartIndex && i < c.execNodeStartIndex+c.numOfExecNodes {
+		if i >= execStartInstance && i < execStartInstance+c.NumOfExecNodes {
 			err := c.K8Env.Client.LabelChaosGroupByLabels(c.K8Env.Cfg.Namespace, labelSelector, ChaosGroupExecution)
 			require.NoError(t, err)
 		}
-		if i >= c.execNodeStartIndex && i < c.execNodeStartIndex+c.numOfAllowedFaultyExec+1 {
+		if i >= execStartInstance && i < execStartInstance+c.NumOfAllowedFaultyExec+1 {
 			err := c.K8Env.Client.LabelChaosGroupByLabels(c.K8Env.Cfg.Namespace, labelSelector, ChaosGroupExecutionFaultyPlus)
 			require.NoError(t, err)
 		}
-		if i >= c.execNodeStartIndex && i < c.execNodeStartIndex+c.numOfAllowedFaultyExec {
+		if i >= execStartInstance && i < execStartInstance+c.NumOfAllowedFaultyExec {
 			err := c.K8Env.Client.LabelChaosGroupByLabels(c.K8Env.Cfg.Namespace, labelSelector, ChaosGroupExecutionFaulty)
 			require.NoError(t, err)
 		}
 	}
 }
 
-func (c *CCIPTestEnv) SetUpNodesAndKeys(
-	nodeFund *big.Float,
-	chains []blockchain.EVMClient,
-	logger zerolog.Logger,
-) error {
-	chainlinkNodes := make([]*client.ChainlinkClient, 0)
+func (c *CCIPTestEnv) ConnectToExistingNodes(envConfig *testconfig.Common) error {
+	if envConfig.ExistingCLCluster == nil {
+		return fmt.Errorf("existing cluster is nil")
+	}
+	noOfNodes := pointer.GetInt(envConfig.ExistingCLCluster.NoOfNodes)
+	namespace := pointer.GetString(envConfig.ExistingCLCluster.Name)
 
-	//var err error
+	for i := 0; i < noOfNodes; i++ {
+		cfg := envConfig.ExistingCLCluster.NodeConfigs[i]
+		if cfg == nil {
+			return fmt.Errorf("node %d config is nil", i+1)
+		}
+		clClient, err := client.NewChainlinkK8sClient(cfg, cfg.InternalIP, namespace)
+		if err != nil {
+			return fmt.Errorf("failed to create chainlink client: %w for node %d config %v", err, i+1, cfg)
+		}
+		clClient.ChainlinkClient.WithRetryCount(3)
+		c.CLNodes = append(c.CLNodes, clClient)
+		c.nodeMutexes = append(c.nodeMutexes, &sync.Mutex{})
+	}
+
+	return nil
+}
+
+func (c *CCIPTestEnv) ConnectToDeployedNodes() error {
 	if c.LocalCluster != nil {
 		// for local cluster, fetch the values from the local cluster
 		for _, chainlinkNode := range c.LocalCluster.ClCluster.Nodes {
-			chainlinkNodes = append(chainlinkNodes, chainlinkNode.API.WithRetryCount(3))
 			c.nodeMutexes = append(c.nodeMutexes, &sync.Mutex{})
+			c.CLNodes = append(c.CLNodes, &client.ChainlinkK8sClient{
+				ChainlinkClient: chainlinkNode.API.WithRetryCount(3),
+			})
 		}
 	} else {
 		// in case of k8s, we need to connect to the chainlink nodes
@@ -2903,8 +2932,8 @@ func (c *CCIPTestEnv) SetUpNodesAndKeys(
 			return fmt.Errorf("no CL node found")
 		}
 
-		for _, chainlinkNode := range chainlinkK8sNodes {
-			chainlinkNodes = append(chainlinkNodes, chainlinkNode.ChainlinkClient.WithRetryCount(3))
+		for i := range chainlinkK8sNodes {
+			chainlinkK8sNodes[i].ChainlinkClient.WithRetryCount(3)
 			c.nodeMutexes = append(c.nodeMutexes, &sync.Mutex{})
 		}
 		c.CLNodes = chainlinkK8sNodes
@@ -2914,10 +2943,24 @@ func (c *CCIPTestEnv) SetUpNodesAndKeys(
 		}
 		c.MockServer = mockServer
 	}
+	return nil
+}
 
+// SetUpNodeKeysAndFund creates node keys and funds the nodes
+func (c *CCIPTestEnv) SetUpNodeKeysAndFund(
+	logger zerolog.Logger,
+	nodeFund *big.Float,
+	chains []blockchain.EVMClient,
+) error {
+	if c.CLNodes == nil || len(c.CLNodes) == 0 {
+		return fmt.Errorf("no chainlink nodes to setup")
+	}
+	var chainlinkNodes []*client.ChainlinkClient
+	for _, node := range c.CLNodes {
+		chainlinkNodes = append(chainlinkNodes, node.ChainlinkClient)
+	}
 	nodesWithKeys := make(map[string][]*client.CLNodesWithKeys)
-	mu := &sync.Mutex{}
-	//grp, _ := errgroup.WithContext(ctx)
+
 	populateKeys := func(chain blockchain.EVMClient) error {
 		log.Info().Str("chain id", chain.GetChainID().String()).Msg("creating node keys for chain")
 		_, clNodes, err := client.CreateNodeKeysBundle(chainlinkNodes, "evm", chain.GetChainID().String())
@@ -2927,8 +2970,7 @@ func (c *CCIPTestEnv) SetUpNodesAndKeys(
 		if len(clNodes) == 0 {
 			return fmt.Errorf("no CL node with keys found for chain %s", chain.GetNetworkName())
 		}
-		mu.Lock()
-		defer mu.Unlock()
+
 		nodesWithKeys[chain.GetChainID().String()] = clNodes
 		return nil
 	}
@@ -2967,6 +3009,7 @@ func (c *CCIPTestEnv) SetUpNodesAndKeys(
 	}
 
 	c.CLNodesWithKeys = nodesWithKeys
+
 	return nil
 }
 
@@ -3127,7 +3170,7 @@ func SetMockServerWithUSDCAttestation(
 	if mockserver != nil {
 		err := mockserver.SetAnyValueResponse(fmt.Sprintf("%s/.*", path), response)
 		if err != nil {
-			return fmt.Errorf("failed to set mockserver value: %w", err)
+			return fmt.Errorf("failed to set mockserver value: %w URL = %s", err, fmt.Sprintf("%s/%s/.*", mockserver.LocalURL(), path))
 		}
 	}
 	return nil
@@ -3162,7 +3205,7 @@ func SetMockserverWithTokenPriceValue(
 			if mockserver != nil {
 				err := mockserver.SetAnyValuePath(fmt.Sprintf("/%s.*", path), tokenValue)
 				if err != nil {
-					log.Fatal().Err(err).Msg("failed to set mockserver value")
+					log.Fatal().Err(err).Str("URL", fmt.Sprintf("%s/%s/.*", mockserver.LocalURL(), path)).Msg("failed to set mockserver value")
 					return
 				}
 			}

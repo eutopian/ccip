@@ -20,6 +20,8 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/config"
 	ctfconfig "github.com/smartcontractkit/chainlink-testing-framework/config"
+
+	"github.com/smartcontractkit/chainlink/integration-tests/client"
 )
 
 const (
@@ -98,17 +100,14 @@ func NewConfig() (*Config, error) {
 	// load config from env var if specified
 	rawConfig, _ := osutil.GetEnv(OVERIDECONFIG)
 	if rawConfig != "" {
-		log.Info().Msgf("Found %s env var, overriding default config", OVERIDECONFIG)
 		override, err = DecodeConfig(rawConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decode override config: %w", err)
 		}
-		log.Info().Interface("override", override).Msg("Applied overrides")
 	}
 	if override != nil {
 		// apply overrides for all products
 		if override.CCIP != nil {
-			log.Info().Interface("override", override).Msg("Applying overrides for CCIP")
 			if cfg.CCIP == nil {
 				cfg.CCIP = override.CCIP
 			} else {
@@ -124,7 +123,6 @@ func NewConfig() (*Config, error) {
 		// load config from env var if specified for secrets
 		secretRawConfig, _ := osutil.GetEnv(SECRETSCONFIG)
 		if secretRawConfig != "" {
-			log.Info().Msgf("Found %s env var, applying secrets", SECRETSCONFIG)
 			secrets, err = DecodeConfig(secretRawConfig)
 			if err != nil {
 				return nil, fmt.Errorf("failed to decode secrets config: %w", err)
@@ -145,40 +143,20 @@ func NewConfig() (*Config, error) {
 			return nil, err
 		}
 	}
-	fmt.Println("running test with config", cfg.TOMLString())
+
 	return cfg, nil
 }
 
 // Common is the generic config struct which can be used with product specific configs.
 // It contains generic DON and networks config which can be applied to all product based tests.
 type Common struct {
-	EnvUser   string                   `toml:",omitempty"`
-	TTL       *config.Duration         `toml:",omitempty"`
-	Chainlink *Chainlink               `toml:",omitempty"`
-	Network   *ctfconfig.NetworkConfig `toml:",omitempty"`
-	Logging   *ctfconfig.LoggingConfig `toml:"Logging"`
-}
-
-func (p *Common) ApplyOverrides(from *Common) error {
-	if from == nil {
-		return nil
-	}
-	if from.EnvUser != "" {
-		p.EnvUser = from.EnvUser
-	}
-	if from.TTL != nil {
-		p.TTL = from.TTL
-	}
-	if from.Network != nil {
-		p.Network = from.Network
-	}
-	if from.Chainlink != nil {
-		if p.Chainlink == nil {
-			p.Chainlink = &Chainlink{}
-		}
-		p.Chainlink.ApplyOverrides(from.Chainlink)
-	}
-	return nil
+	EnvUser           string                   `toml:",omitempty"`
+	TTL               *config.Duration         `toml:",omitempty"`
+	ExistingCLCluster *CLCluster               `toml:",omitempty"` // ExistingCLCluster is the existing chainlink cluster to use, if specified it will be used instead of creating a new one
+	Mockserver        *string                  `toml:",omitempty"`
+	NewCLCluster      *ChainlinkDeployment     `toml:",omitempty"` // NewCLCluster is the new chainlink cluster to create, if specified along with ExistingCLCluster this will be ignored
+	Network           *ctfconfig.NetworkConfig `toml:",omitempty"`
+	Logging           *ctfconfig.LoggingConfig `toml:"Logging"`
 }
 
 func (p *Common) Validate() error {
@@ -188,19 +166,41 @@ func (p *Common) Validate() error {
 	if p.Network == nil {
 		return errors.New("no networks specified")
 	}
+	// read the default network config, if specified
+	p.Network.UpperCaseNetworkNames()
+	p.Network.OverrideURLsAndKeysFromEVMNetwork()
+	err := p.Network.Default()
+	if err != nil {
+		return fmt.Errorf("error reading default network config %w", err)
+	}
 	if err := p.Network.Validate(); err != nil {
 		return fmt.Errorf("error validating networks config %w", err)
 	}
-	return p.Chainlink.Validate()
+	if p.NewCLCluster == nil && p.ExistingCLCluster == nil {
+		return errors.New("no chainlink or existing cluster specified")
+	}
+
+	if p.ExistingCLCluster != nil {
+		if err := p.ExistingCLCluster.Validate(); err != nil {
+			return fmt.Errorf("error validating existing chainlink cluster config %w", err)
+		}
+		if p.Mockserver == nil {
+			return errors.New("no mockserver specified for existing chainlink cluster")
+		}
+		log.Warn().Msg("Using existing chainlink cluster, overriding new chainlink cluster config if specified")
+		p.NewCLCluster = nil
+	} else {
+		if p.NewCLCluster != nil {
+			if err := p.NewCLCluster.Validate(); err != nil {
+				return fmt.Errorf("error validating chainlink config %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 func (p *Common) EVMNetworks() ([]blockchain.EVMNetwork, []string, error) {
-	p.Network.UpperCaseNetworkNames()
-	err := p.Network.Default()
-	if err != nil {
-		return nil, p.Network.SelectedNetworks, fmt.Errorf("error reading default network config %w", err)
-	}
-	evmNetworks := networks.MustSetNetworks(*p.Network)
+	evmNetworks := networks.MustGetSelectedNetworkConfig(p.Network)
 	if len(p.Network.SelectedNetworks) != len(evmNetworks) {
 		return nil, p.Network.SelectedNetworks, fmt.Errorf("selected networks %v do not match evm networks %v", p.Network.SelectedNetworks, evmNetworks)
 	}
@@ -212,7 +212,7 @@ func (p *Common) GetLoggingConfig() *ctfconfig.LoggingConfig {
 }
 
 func (p *Common) GetChainlinkImageConfig() *ctfconfig.ChainlinkImageConfig {
-	return p.Chainlink.Common.ChainlinkImage
+	return p.NewCLCluster.Common.ChainlinkImage
 }
 
 func (p *Common) GetPyroscopeConfig() *ctfconfig.PyroscopeConfig {
@@ -250,7 +250,38 @@ func (p *Common) GetGrafanaDashboardURL() (string, error) {
 	return url, nil
 }
 
-type Chainlink struct {
+type CLCluster struct {
+	Name        *string                   `toml:",omitempty"`
+	NoOfNodes   *int                      `toml:",omitempty"`
+	NodeConfigs []*client.ChainlinkConfig `toml:",omitempty"`
+}
+
+func (c *CLCluster) Validate() error {
+	if c.NoOfNodes == nil || len(c.NodeConfigs) == 0 {
+		return fmt.Errorf("no chainlink nodes specified")
+	}
+	if *c.NoOfNodes != len(c.NodeConfigs) {
+		return fmt.Errorf("number of nodes %d does not match number of node configs %d", *c.NoOfNodes, len(c.NodeConfigs))
+	}
+	for i, nodeConfig := range c.NodeConfigs {
+		if nodeConfig.URL == "" {
+			return fmt.Errorf("node %d url not specified", i+1)
+		}
+		if nodeConfig.Password == "" {
+			return fmt.Errorf("node %d password not specified", i+1)
+		}
+		if nodeConfig.Email == "" {
+			return fmt.Errorf("node %d email not specified", i+1)
+		}
+		if nodeConfig.InternalIP == "" {
+			return fmt.Errorf("node %d internal ip not specified", i+1)
+		}
+	}
+
+	return nil
+}
+
+type ChainlinkDeployment struct {
 	Common     *Node    `toml:",omitempty"`
 	NodeMemory string   `toml:",omitempty"`
 	NodeCPU    string   `toml:",omitempty"`
@@ -263,54 +294,7 @@ type Chainlink struct {
 	Nodes      []*Node  `toml:",omitempty"` // to be mentioned only if diff nodes follow diff configs; not required if all nodes follow CommonConfig
 }
 
-func (c *Chainlink) ApplyOverrides(from *Chainlink) {
-	if from == nil {
-		return
-	}
-	if from.NoOfNodes != nil {
-		c.NoOfNodes = from.NoOfNodes
-	}
-	if from.Common != nil {
-		c.Common.ApplyOverrides(from.Common)
-	}
-	if from.Nodes != nil {
-		for i, node := range from.Nodes {
-			if len(c.Nodes) > i {
-				c.Nodes[i].ApplyOverrides(node)
-			} else {
-				c.Nodes = append(c.Nodes, node)
-			}
-		}
-	}
-	if len(c.Nodes) > 0 {
-		for i := range c.Nodes {
-			c.Nodes[i].Merge(c.Common)
-		}
-	}
-	if from.NodeMemory != "" {
-		c.NodeMemory = from.NodeMemory
-	}
-	if from.NodeCPU != "" {
-		c.NodeCPU = from.NodeCPU
-	}
-	if from.DBMemory != "" {
-		c.DBMemory = from.DBMemory
-	}
-	if from.DBCPU != "" {
-		c.DBCPU = from.DBCPU
-	}
-	if from.DBArgs != nil {
-		c.DBArgs = from.DBArgs
-	}
-	if from.DBCapacity != "" {
-		c.DBCapacity = from.DBCapacity
-	}
-	if from.IsStateful != nil {
-		c.IsStateful = from.IsStateful
-	}
-}
-
-func (c *Chainlink) Validate() error {
+func (c *ChainlinkDeployment) Validate() error {
 	if c.Common == nil {
 		return errors.New("common config can't be empty")
 	}
@@ -331,7 +315,10 @@ func (c *Chainlink) Validate() error {
 		if noOfNodes != len(c.Nodes) {
 			return errors.New("chainlink config is invalid, NoOfNodes and Nodes length mismatch")
 		}
-		for _, node := range c.Nodes {
+		for i := range c.Nodes {
+			// merge common config with node specific config
+			c.Nodes[i].Merge(c.Common)
+			node := c.Nodes[i]
 			if node.ChainlinkImage == nil {
 				return fmt.Errorf("node %s: chainlink image can't be empty", node.Name)
 			}
@@ -344,6 +331,9 @@ func (c *Chainlink) Validate() error {
 		}
 	}
 	return nil
+}
+
+type CRIBNode struct {
 }
 
 type Node struct {
@@ -414,63 +404,6 @@ func (n *Node) Merge(from *Node) {
 		for k, v := range from.ChainConfigTOMLByChain {
 			if _, ok := n.ChainConfigTOMLByChain[k]; !ok {
 				n.ChainConfigTOMLByChain[k] = v
-			}
-		}
-	}
-}
-
-func (n *Node) ApplyOverrides(from *Node) {
-	if from == nil {
-		return
-	}
-	if n == nil {
-		return
-	}
-	if from.Name != "" {
-		n.Name = from.Name
-	}
-	if from.ChainlinkImage != nil {
-		if n.ChainlinkImage == nil {
-			n.ChainlinkImage = from.ChainlinkImage
-		} else {
-			if from.ChainlinkImage.Image != nil {
-				n.ChainlinkImage.Image = from.ChainlinkImage.Image
-			}
-			if from.ChainlinkImage.Version != nil {
-				n.ChainlinkImage.Version = from.ChainlinkImage.Version
-			}
-		}
-	}
-	if from.ChainlinkUpgradeImage != nil {
-		if n.ChainlinkUpgradeImage == nil {
-			n.ChainlinkUpgradeImage = from.ChainlinkUpgradeImage
-		} else {
-			if from.ChainlinkUpgradeImage.Image != nil {
-				n.ChainlinkUpgradeImage.Image = from.ChainlinkUpgradeImage.Image
-			}
-			if from.ChainlinkUpgradeImage.Version != nil {
-				n.ChainlinkUpgradeImage.Version = from.ChainlinkUpgradeImage.Version
-			}
-		}
-	}
-	if from.DBImage != "" {
-		n.DBImage = from.DBImage
-	}
-	if from.DBTag != "" {
-		n.DBTag = from.DBTag
-	}
-	if from.BaseConfigTOML != "" {
-		n.BaseConfigTOML = from.BaseConfigTOML
-	}
-	if from.CommonChainConfigTOML != "" {
-		n.CommonChainConfigTOML = from.CommonChainConfigTOML
-	}
-	if from.ChainConfigTOMLByChain != nil {
-		if n.ChainConfigTOMLByChain == nil {
-			n.ChainConfigTOMLByChain = from.ChainConfigTOMLByChain
-		} else {
-			for chainID, cfg := range from.ChainConfigTOMLByChain {
-				n.ChainConfigTOMLByChain[chainID] = cfg
 			}
 		}
 	}
