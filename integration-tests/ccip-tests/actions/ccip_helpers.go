@@ -1895,6 +1895,29 @@ func (lane *CCIPLane) TokenPricesConfig() (string, error) {
 	return d.String()
 }
 
+// OptimizeStorage sets nil to various elements of CCIPLane which are only used
+// during lane set up and not used for rest of the test duration
+// this is called mainly by load test to keep the memory usage minimum for high number of lanes
+func (lane *CCIPLane) OptimizeStorage() {
+	lane.Source.Common.FreeUpUnusedSpace()
+	lane.Dest.Common.FreeUpUnusedSpace()
+	lane.DstNetworkLaneCfg = nil
+	lane.SrcNetworkLaneCfg = nil
+	// close all header subscriptions for dest chains
+	queuedEvents := lane.Dest.Common.ChainClient.GetHeaderSubscriptions()
+	for subName := range queuedEvents {
+		lane.Dest.Common.ChainClient.DeleteHeaderEventSubscription(subName)
+	}
+	// close all header subscriptions for source chains except for finalized header
+	queuedEvents = lane.Source.Common.ChainClient.GetHeaderSubscriptions()
+	for subName := range queuedEvents {
+		if subName == blockchain.FinalizedHeaderKey {
+			continue
+		}
+		lane.Source.Common.ChainClient.DeleteHeaderEventSubscription(subName)
+	}
+}
+
 func (lane *CCIPLane) UpdateLaneConfig() {
 	var btAddresses, btpAddresses []string
 
