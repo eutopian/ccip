@@ -354,7 +354,7 @@ func (o *CCIPTestSetUpOutputs) AddLanesForNetworkPair(
 	networkA, networkB blockchain.EVMNetwork,
 	chainClientA, chainClientB blockchain.EVMClient,
 	transferAmounts []*big.Int,
-	commitAndExecOnSameDON, bidirectional bool,
+	commitAndExecOnSameDON, bidirectional, withPipeline bool,
 ) error {
 	var allErrors atomic.Error
 	t := o.Cfg.Test
@@ -477,10 +477,6 @@ func (o *CCIPTestSetUpOutputs) AddLanesForNetworkPair(
 	if networkBCmn == nil {
 		return errors.WithStack(fmt.Errorf("chain contracts for network %s not found", networkB.Name))
 	}
-
-	// Now testing only with dynamic price getter (no pipeline).
-	// Could be removed once the pipeline is completely removed.
-	withPipeline := false
 
 	setUpFuncs.Go(func() error {
 		lggr.Info().Msgf("Setting up lane %s to %s", networkA.Name, networkB.Name)
@@ -713,15 +709,19 @@ func CCIPDefaultTestSetUp(
 	}
 	require.NoError(t, chainAddGrp.Wait(), "Deploying common contracts shouldn't fail")
 
+	withPipeline := pointer.GetBool(setUpArgs.Cfg.TestGroupInput.WithPipeline)
+
 	// set up mock server for price pipeline and usdc attestation if not using existing deployment
 	if !pointer.GetBool(setUpArgs.Cfg.TestGroupInput.ExistingDeployment) {
 		var killgrave *ctftestenv.Killgrave
 		if setUpArgs.Env.LocalCluster != nil {
 			killgrave = setUpArgs.Env.LocalCluster.MockAdapter
 		}
-		// set up mock server for price pipeline. need to set it once for all the lanes as the price pipeline path uses
-		// regex to match the path for all tokens across all lanes
-		actions.SetMockserverWithTokenPriceValue(killgrave, setUpArgs.Env.MockServer)
+		if withPipeline {
+			// set up mock server for price pipeline. need to set it once for all the lanes as the price pipeline path uses
+			// regex to match the path for all tokens across all lanes
+			actions.SetMockserverWithTokenPriceValue(killgrave, setUpArgs.Env.MockServer)
+		}
 		if pointer.GetBool(setUpArgs.Cfg.TestGroupInput.USDCMockDeployment) {
 			// if it's a new USDC deployment, set up mock server for attestation,
 			// we need to set it only once for all the lanes as the attestation path uses regex to match the path for
@@ -752,6 +752,7 @@ func CCIPDefaultTestSetUp(
 				chainByChainID[n.NetworkA.ChainID], chainByChainID[n.NetworkB.ChainID], transferAmounts,
 				pointer.GetBool(testConfig.TestGroupInput.CommitAndExecuteOnSameDON),
 				pointer.GetBool(testConfig.TestGroupInput.BiDirectionalLane),
+				withPipeline,
 			)
 		})
 	}
